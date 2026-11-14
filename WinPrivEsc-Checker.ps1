@@ -496,7 +496,7 @@ sub "KeePass databases (known locations)"
 @("$env:USERPROFILE\Documents","$env:USERPROFILE\Desktop","$env:USERPROFILE\Downloads",
   'C:\Users\Public\Documents','C:\Temp','C:\Backups') | %{
     if (Test-Path $_) {
-        Get-ChildItem $_ -Include '*.kdbx' -Force -ErrorAction SilentlyContinue | Select-Object -First 3 | %{
+        Get-ChildItem "$_\*" -Include '*.kdbx' -Force -ErrorAction SilentlyContinue | Select-Object -First 3 | %{
             finding 'HIGH' "KeePass DB: $($_.FullName)" "Size: $($_.Length) bytes" `
                 "keepass2john `"$($_.FullName)`" > hash.txt`nhashcat -m 13400 hash.txt rockyou.txt"
         }
@@ -507,7 +507,7 @@ sub "RDP files and private keys (known locations)"
 @("$env:USERPROFILE\Documents","$env:USERPROFILE\Desktop","$env:USERPROFILE\Downloads",
   "$env:USERPROFILE\.ssh") | %{
     if (Test-Path $_) {
-        Get-ChildItem $_ -Include '*.rdp','*.ppk','*.pem','*.key','*.pfx','*.p12','*.id_rsa' -Force -ErrorAction SilentlyContinue | Select-Object -First 5 | %{
+        Get-ChildItem "$_\*" -Include '*.rdp','*.ppk','*.pem','*.key','*.pfx','*.p12','*.id_rsa' -Force -ErrorAction SilentlyContinue | Select-Object -First 5 | %{
             $ext = $_.Extension
             if ($ext -eq '.rdp') {
                 finding 'MED' "RDP file: $($_.FullName)" $null `
@@ -998,8 +998,8 @@ $autorunKeys = @(
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunService',
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnceService'
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunServices',
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnceServices'
 )
 $autorunCount = 0
 foreach ($key in $autorunKeys) {
@@ -1068,7 +1068,7 @@ netstat -ano 2>$null | Select-String 'LISTENING' | %{
         $hint = $interestingPorts[$port]
         if ($hint -or $addr -eq '127.0.0.1') {
             $label = if ($addr -eq '127.0.0.1') { '(localhost only)' } else { '' }
-            $sev = if ($hint -and $addr -eq '127.0.0.1') { 'MED' } else { 'INFO' }
+            $sev = if ($hint -and $addr -ne '127.0.0.1') { 'MED' } elseif ($hint) { 'LOW' } else { 'INFO' }
             finding $sev "Port $port - $procName (PID $pid) $label" $(if($hint){$hint})
         }
     }
@@ -1148,7 +1148,7 @@ if ($clm -ne 'FullLanguage') {
 hdr "§11 - KERNEL / CVE CHECKS (last resort)"
 
 sub "Patch level"
-$hotfixes = Get-HotFix -ErrorAction SilentlyContinue | Sort-Object InstalledOn -Descending
+$hotfixes = Get-HotFix -ErrorAction SilentlyContinue | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending
 if ($hotfixes) {
     $latest = $hotfixes | Select-Object -First 1
     $daysSince = ((Get-Date) - $latest.InstalledOn).Days
@@ -1259,7 +1259,7 @@ if ($cs.PartOfDomain) {
                     $line = $_.Trim()
                     if ($line -match '^Checking domain') { return }
                     if ($line -match '^Existing SPN') { return }
-                    if ($line -match '^CN=([^,]+),' -or $line -match '^([^\s/]+)$' -and $line -match '\\') {
+                    if (($line -match '^CN=([^,]+),') -or ($line -match '^([^\s/]+)$' -and $line -match '\\')) {
                         $currentAccount = $line
                     }
                     elseif ($line -match '/' -and $currentAccount) {
@@ -1347,7 +1347,8 @@ if ($cs.PartOfDomain) {
 
 sub "LAPS"
 $laps = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd' -ErrorAction SilentlyContinue
-if ($laps -and $laps.AdmPwdEnabled -eq 1) {
+$lapsNew = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\LAPS\Config' -ErrorAction SilentlyContinue
+if (($laps -and $laps.AdmPwdEnabled -eq 1) -or $lapsNew) {
     finding 'INFO' "LAPS enabled" $null `
         "Get-ADComputer -Filter * -Properties ms-Mcs-AdmPwd | ?{`$_.'ms-Mcs-AdmPwd'}"
 } else {
