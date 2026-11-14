@@ -120,7 +120,8 @@ function Test-Writable($path) {
                 [Security.AccessControl.FileSystemRights]::AppendData)
             if (-not $w) { continue }
             $id = $r.IdentityReference.Value
-            if ($id -in $weak -or $id -in $myIds) { return $true }
+            if ($id -in $weak) { return $true }
+            if (-not $isAdm -and $id -in $myIds) { return $true }
         }
     } catch {}
     return $false
@@ -128,6 +129,10 @@ function Test-Writable($path) {
 
 function Test-WritableDir($path) {
     if (-not (Test-Path $path)) { return $false }
+    if ($isAdm) {
+        # When admin, only flag dirs writable by weak groups (not by admin rights alone)
+        return (Test-Writable $path)
+    }
     try {
         $f = Join-Path $path ([IO.Path]::GetRandomFileName())
         [IO.File]::Create($f).Close(); Remove-Item $f -Force; return $true
@@ -148,7 +153,8 @@ function Test-RegWritable($regPath) {
                 [Security.AccessControl.RegistryRights]::WriteKey)
             if (-not $w) { continue }
             $id = $r.IdentityReference.Value
-            if ($id -in $weak -or $id -in $myIds) { return $true }
+            if ($id -in $weak) { return $true }
+            if (-not $isAdm -and $id -in $myIds) { return $true }
         }
     } catch {}
     return $false
@@ -199,6 +205,9 @@ whoami /groups 2>$null | %{
     if ($_ -match 'System Mandatory') { $integ = 'System' }
 }
 Write-Host "  Integrity: $integ" -ForegroundColor $(if($integ -match 'High|System'){'Green'}elseif($integ -eq 'Medium'){'Yellow'}else{'Red'})
+if ($isAdm) {
+    Write-Host "  NOTE     : Running as admin - filtering out admin-expected write access (less noise)" -ForegroundColor DarkYellow
+}
 
 sub "Local administrators"
 net localgroup administrators 2>$null | %{ Write-Host "    $_" -ForegroundColor Gray }
@@ -288,8 +297,9 @@ hdr "§1 - FREE CREDENTIAL WINS"
 
 sub "Stored credentials (cmdkey /list)"
 $ck = cmdkey /list 2>$null | Out-String
-if ($ck -match 'Target:') {
-    finding 'HIGH' 'Stored credentials found' $ck.Trim() `
+$ckFiltered = ($ck -split "`n" | Where-Object { $_ -notmatch 'virtualapp/didlogical' }) -join "`n"
+if ($ckFiltered -match 'Target:') {
+    finding 'HIGH' 'Stored credentials found' $ckFiltered.Trim() `
         "runas /savecred /user:<domain\user> cmd.exe`nrunas /savecred /user:<user> `"powershell -ep bypass -f shell.ps1`""
 } else { info "No stored credentials." }
 
@@ -699,7 +709,8 @@ foreach ($svc in $allServices) {
 }
 if ($writableSvcDirCount -eq 0) { info "No writable service directories (excluding system dirs)." }
 
-# --- MOVED from Extended to default: Service DACL check ---
+# --- Service DACL check (skip when admin - admin can modify any service) ---
+if (-not $isAdm) {
 sub "Modifiable service DACLs"
 $modifiableSvcCount = 0
 foreach ($svc in ($allServices | Select-Object -First 80)) {
@@ -714,6 +725,7 @@ foreach ($svc in ($allServices | Select-Object -First 80)) {
     } catch {}
 }
 if ($modifiableSvcCount -eq 0) { info "No modifiable service DACLs found." }
+} # end if (-not $isAdm)
 
 if ($Extended) {
     sub "Writable service registry keys (Extended)"
