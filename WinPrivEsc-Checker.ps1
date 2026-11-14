@@ -496,7 +496,7 @@ sub "KeePass databases (known locations)"
 @("$env:USERPROFILE\Documents","$env:USERPROFILE\Desktop","$env:USERPROFILE\Downloads",
   'C:\Users\Public\Documents','C:\Temp','C:\Backups') | %{
     if (Test-Path $_) {
-        Get-ChildItem $_ -Include '*.kdbx' -Force -ErrorAction SilentlyContinue | Select-Object -First 3 | %{
+        Get-ChildItem "$_\*" -Include '*.kdbx' -Force -ErrorAction SilentlyContinue | Select-Object -First 3 | %{
             finding 'HIGH' "KeePass DB: $($_.FullName)" "Size: $($_.Length) bytes" `
                 "keepass2john `"$($_.FullName)`" > hash.txt`nhashcat -m 13400 hash.txt rockyou.txt"
         }
