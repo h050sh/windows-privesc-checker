@@ -936,7 +936,7 @@ if ($sqlInstances.Count -gt 0) {
 
             $conn.Close()
         } catch {
-            bg "MSSQL $server: cannot connect with current user"
+            bg "MSSQL ${server}: cannot connect with current user"
         }
     }
 } else {
