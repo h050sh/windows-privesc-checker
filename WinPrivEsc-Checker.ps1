@@ -377,28 +377,29 @@ function Report-HistoryFile($type, $owner, $file) {
     $sizeTxt = if ($size -ge 1KB) { "$([math]::Round($size/1KB,1)) KB" } else { "$size bytes" }
     $title = "$type history [$owner]: $path ($sizeTxt)"
 
-    # Rule: anything over 1 byte is HIGH, no matter whose it is or what is in it.
-    if ($size -le 1) { finding 'LOW' "$title - empty"; return }
+    # Rule: every non-empty file is HIGH, no matter whose it is or what is in it.
+    if ($size -eq 0) { finding 'LOW' "$title - empty"; return }
 
-    $detail = @()
     try {
         $lines = @(Get-Content -LiteralPath $path -ErrorAction Stop)
-        $kwHits = @($lines | Where-Object { $_ -match $histKeywords })
-        $detail += "Readable: yes ($($lines.Count) lines)"
-        if ($kwHits.Count -gt 0) {
-            $detail += "Credential keywords on $($kwHits.Count) line(s), first 5:"
-            $kwHits | Select-Object -First 5 | ForEach-Object {
-                $l = "$_".Trim()
-                if ($l.Length -gt 150) { $l = $l.Substring(0,150) + '...' }
-                $detail += "  $l"
-            }
-        }
     } catch {
-        $detail += "Readable: NO as current user - file exists, read it after privesc"
+        finding 'HIGH' $title "Readable: NO as current user - file exists, read it after privesc" `
+            "type `"$path`""
+        return
     }
 
-    finding 'HIGH' $title ($detail -join "`n") `
-        "type `"$path`"`ntype `"$path`" | findstr /i `"password passwd pwd cred secret token key runas net psexec ssh`""
+    $kwCount = @($lines | Where-Object { $_ -match $histKeywords }).Count
+    $detail = "Readable: yes ($($lines.Count) lines)"
+    if ($kwCount -gt 0) { $detail += "`nCredential keywords on $kwCount line(s) - highlighted in yellow below" }
+    finding 'HIGH' $title $detail $null
+
+    # Dump the full history right away; lines with credential keywords in yellow.
+    Write-Host "    ----- begin $path -----" -ForegroundColor DarkCyan
+    foreach ($l in $lines) {
+        $color = if ($l -match $histKeywords) { 'Yellow' } else { 'Gray' }
+        Write-Host "    | $l" -ForegroundColor $color
+    }
+    Write-Host "    ----- end $path -----" -ForegroundColor DarkCyan
 }
 
 foreach ($pd in $histProfiles) {
