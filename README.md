@@ -21,7 +21,7 @@ No internet, no external tools, no APIs required.
 | Section | Description |
 |---------|-------------|
 | **§0 Orientation** | OS info, user context, integrity level, group memberships, token privileges |
-| **§1 Credential Wins** | Stored creds, AutoLogon, PS history, PuTTY/WinSCP/mRemoteNG/FileZilla sessions, WiFi keys, DPAPI blobs, browser data |
+| **§1 Credential Wins** | Stored creds, AutoLogon, PowerShell + CMD (Clink/Cmder) history of every user profile (always HIGH when > 1 byte), PuTTY/WinSCP/mRemoteNG/FileZilla sessions, WiFi keys, DPAPI blobs, browser data |
 | **§2 File Search** | Unattend/sysprep files, SAM/SYSTEM backups, shadow copies, KeePass DBs, private keys, web configs, GPP cpassword |
 | **§3 UAC** | UAC configuration, AlwaysInstallElevated, WSUS over HTTP |
 | **§4 Services** | Unquoted paths, writable binaries/directories, modifiable DACLs, service registry keys |

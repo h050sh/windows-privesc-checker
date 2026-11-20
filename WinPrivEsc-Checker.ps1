@@ -347,21 +347,78 @@ if ($foundWinOld.Count -ge 2) {
     }
 }
 
-sub "PowerShell history (all users)"
-$userDirs = Get-ChildItem 'C:\Users' -Directory -Force 2>$null
-foreach ($ud in $userDirs) {
-    $hist = Join-Path $ud.FullName 'AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt'
-    if (Test-Path $hist) {
-        $size = (Get-Item $hist).Length
-        $content = Get-Content $hist -TotalCount 50 2>$null | Out-String
-        $hasCreds = $content -match '(?i)(password|passwd|cred|secret|token|key|runas|net use|psexec|invoke-command)'
-        $sev = if ($hasCreds) { 'HIGH' } else { 'MED' }
-        $sizeKB = [math]::Round($size/1KB,1)
-        $histDetail = if ($hasCreds) { 'Contains potential credential keywords!' } else { $null }
-        finding $sev "PS history: $hist ($sizeKB KB)" `
-            $histDetail `
-            "type ""$hist""`ntype ""$hist"" | findstr /i ""password passwd cred secret token runas net"""
+sub "PowerShell + CMD history (all users)"
+# Every profile on the box: C:\Users\* + ProfileList (also catches profiles on other
+# drives) + SYSTEM / LocalService / NetworkService profiles.
+$histProfiles = @()
+$histProfiles += Get-ChildItem "$env:SystemDrive\Users" -Force 2>$null |
+    Where-Object { $_.PSIsContainer } | ForEach-Object { $_.FullName }
+Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' 2>$null | ForEach-Object {
+    $p = (Get-ItemProperty $_.PSPath 2>$null).ProfileImagePath
+    if ($p) { $histProfiles += [Environment]::ExpandEnvironmentVariables($p) }
+}
+$histProfiles += "$env:SystemRoot\System32\config\systemprofile"
+$histProfiles += "$env:SystemRoot\ServiceProfiles\LocalService"
+$histProfiles += "$env:SystemRoot\ServiceProfiles\NetworkService"
+$histProfiles = @($histProfiles | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') } | Sort-Object -Unique)
+
+# PSReadLine writes <Host>_history.txt per host (ConsoleHost, ISE, VS Code, ...),
+# same path for Windows PowerShell and PowerShell 7.
+# cmd.exe itself never saves history to disk; Clink (and Cmder, which bundles it) does.
+$histLocations = @(
+    @{ Type = 'PowerShell';  Dir = 'AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine'; Filter = '*history*' },
+    @{ Type = 'CMD (Clink)'; Dir = 'AppData\Local\clink';                                     Filter = '*history*' }
+)
+$histKeywords = '(?i)(password|passwd|pwd|cred|secret|token|apikey|api_key|key|runas|net use|net user|psexec|invoke-command|enter-pssession|convertto-securestring|pscredential|sqlcmd|ssh )'
+
+function Report-HistoryFile($type, $owner, $file) {
+    $path = $file.FullName
+    $size = $file.Length
+    $sizeTxt = if ($size -ge 1KB) { "$([math]::Round($size/1KB,1)) KB" } else { "$size bytes" }
+    $title = "$type history [$owner]: $path ($sizeTxt)"
+
+    # Rule: anything over 1 byte is HIGH, no matter whose it is or what is in it.
+    if ($size -le 1) { finding 'LOW' "$title - empty"; return }
+
+    $detail = @()
+    try {
+        $lines = @(Get-Content -LiteralPath $path -ErrorAction Stop)
+        $kwHits = @($lines | Where-Object { $_ -match $histKeywords })
+        $detail += "Readable: yes ($($lines.Count) lines)"
+        if ($kwHits.Count -gt 0) {
+            $detail += "Credential keywords on $($kwHits.Count) line(s), first 5:"
+            $kwHits | Select-Object -First 5 | ForEach-Object {
+                $l = "$_".Trim()
+                if ($l.Length -gt 150) { $l = $l.Substring(0,150) + '...' }
+                $detail += "  $l"
+            }
+        }
+    } catch {
+        $detail += "Readable: NO as current user - file exists, read it after privesc"
     }
+
+    finding 'HIGH' $title ($detail -join "`n") `
+        "type `"$path`"`ntype `"$path`" | findstr /i `"password passwd pwd cred secret token key runas net psexec ssh`""
+}
+
+foreach ($pd in $histProfiles) {
+    $owner = Split-Path $pd -Leaf
+    if ($pd -match '\\config\\systemprofile$') { $owner = 'SYSTEM' }
+    if ($owner -eq $env:USERNAME) { $owner = "$owner (you)" }
+    foreach ($loc in $histLocations) {
+        $dir = Join-Path $pd $loc.Dir
+        if (-not (Test-Path $dir)) { continue }
+        Get-ChildItem $dir -Filter $loc.Filter -Force 2>$null |
+            Where-Object { -not $_.PSIsContainer } |
+            ForEach-Object { Report-HistoryFile $loc.Type $owner $_ }
+    }
+}
+
+# Cmder can live anywhere - only findable for the current user via CMDER_ROOT.
+if ($env:CMDER_ROOT -and (Test-Path "$env:CMDER_ROOT\config")) {
+    Get-ChildItem "$env:CMDER_ROOT\config" -Filter '*history*' -Force 2>$null |
+        Where-Object { -not $_.PSIsContainer } |
+        ForEach-Object { Report-HistoryFile 'CMD (Cmder)' "$env:USERNAME (you)" $_ }
 }
 
 sub "PuTTY saved sessions"
