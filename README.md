@@ -7,14 +7,40 @@ Standalone PowerShell enumeration script for Windows privilege escalation. Built
 ## Usage
 
 ```powershell
-# Standard scan
+# Standard scan (as low-priv user)
 powershell -ep bypass -f WinPrivEsc-Checker.ps1
 
 # Extended scan (slower, deeper file search + extra checks)
 powershell -ep bypass -f WinPrivEsc-Checker.ps1 -Extended
+
+# Admin mode — already have admin? Skip privesc noise, focus on loot & lateral movement
+powershell -ep bypass -f WinPrivEsc-Checker.ps1 -Admin
 ```
 
 No internet, no external tools, no APIs required.
+
+## Modes
+
+### Default (no flags)
+Full privilege escalation scan: finds writable services, unquoted paths, DLL hijacking, UAC bypasses, kernel exploits, and more.
+
+### `-Extended`
+Everything in the default scan plus deeper file searches, known DLL hijack binaries, writable registry keys, and processes running as other users.
+
+### `-Admin`
+Post-exploitation mode for when you already have admin. **Skips all privesc checks** (services, scheduled tasks, UAC, DLL hijack, autoruns, kernel/CVE) and focuses on:
+
+- All credentials (histories, stored creds, AutoLogon, PuTTY/WinSCP, browser data, WiFi keys)
+- Full PowerShell + CMD history of every user, printed inline
+- SAM/SYSTEM + LSASS dump reminders with commands
+- DPAPI master keys and credential blobs for all users
+- Interesting files across all profiles (`.kdbx`, `.ppk`, `.pem`, `.rdp`, `.sql`, `.env`, etc.)
+- Non-default files in `C:\`, `C:\Temp`, `C:\Backups`, `C:\Scripts`, etc.
+- Scheduled tasks by non-system accounts
+- Active logon sessions and RDP saved connections
+- Recently run programs (UserAssist, ROT13 decoded)
+- Full domain enumeration: all users with password ages, Domain/Enterprise/Schema Admins members, Kerberoastable + ASREProastable users, constrained/unconstrained delegation, domain trusts, GPOs, DNS zones, computer accounts
+- Network, defenses, MSSQL, mapped shares
 
 ## What It Checks
 
@@ -33,6 +59,7 @@ No internet, no external tools, no APIs required.
 | **§10 Defenses** | Defender status & exclusions, AppLocker, PS logging, language mode |
 | **§11 Kernel/CVE** | Patch level, HiveNightmare, PrintNightmare, Potato attacks, EternalBlue |
 | **§12 Misc & Domain** | Mapped shares, writable staging dirs, Kerberoasting, ASREProasting, delegation, LAPS |
+| **§13 Admin Extras** | *(only with `-Admin`)* All local users, SAM/LSASS dump commands, DPAPI keys, interesting files, non-default files, scheduled tasks by user accounts, logon sessions, RDP connections, UserAssist, domain users + groups + computers + GPOs + DNS + trusts |
 
 ## Output
 

