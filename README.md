@@ -50,7 +50,7 @@ Post-exploitation mode for when you already have admin. **Skips all privesc chec
 | **§1 Credential Wins** | Stored creds, AutoLogon, PowerShell + CMD (Clink/Cmder) history of every user profile (always HIGH when non-empty, full contents printed), PuTTY/WinSCP/mRemoteNG/FileZilla sessions, WiFi keys, DPAPI blobs, browser data |
 | **§2 File Search** | Unattend/sysprep files, SAM/SYSTEM backups, shadow copies, KeePass DBs, private keys, web configs, GPP cpassword |
 | **§3 UAC** | UAC configuration, AlwaysInstallElevated, WSUS over HTTP |
-| **§4 Services** | Unquoted paths, writable binaries/directories, modifiable DACLs, service registry keys |
+| **§4 Services** | Non-default service accounts, unquoted paths, writable + restartable services (binary or directory, matched against current user's real SIDs with SDDL restart check), service registry keys |
 | **§5 Scheduled Tasks** | Writable task binaries and directories |
 | **§6 PATH/DLL Hijacking** | Writable PATH directories, known DLL hijack targets |
 | **§7 Software & MSSQL** | Installed software with known cred storage, writable install dirs, MSSQL sysadmin/impersonation/linked servers/xp_cmdshell |

